@@ -126,7 +126,9 @@ konzole `rolling 15`:
   z *Restart Warning* přes `Broadcast`) a jde dolů, až předchozí naběhne. Dole je
   vždy jen jedna, ostatní běží; přechod na mapu, která se zrovna restartuje, ty
   minuty nejde. Odpočty dalších map běží souběžně, takže mapy jdou dolů zhruba po
-  7 minutách (úklid, uložení, start a poslední minuta varování) — 13 map ~1,5 h.
+  7 minutách (úklid, uložení, start a poslední minuta varování) — 13 map ~1,5–2 h.
+  Změřeno na ASE (TheIsland a Ragnarok): mapa dole 5–7 min, druhá jde dolů 7 min
+  po první.
 - **nikdy dřív, než hráči slyšeli** — když restart trvá déle, plán dalších map se
   posune a poslední minutu mapa hlásí, až když je opravdu na řadě.
 - **mody s aktualizací → všechny mapy naráz.** ASE s `-AutoManagedMods` si novou
