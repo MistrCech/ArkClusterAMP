@@ -51,16 +51,19 @@ class Rcon:
     def command(self, text, **_):
         if not self.server.running:
             raise sup.RconError("mapa nebezi")
-        self.server.sup.events.append((self.server.sup.clock.t, self.server.name, text))
+        sv = self.server.sup
+        sv.clock.t += sv.rcon_delay        # pomaly RCON: hraci zpravu slysi az po nem
+        sv.events.append((sv.clock.t, self.server.name, text))
         return ""
 
 
 class Server:
     def __init__(self, sv, name, running=True):
         self.sup, self.name, self.running, self.desired_up = sv, name, running, running
-        self.rcon = Rcon(self)
+        self.rcon, self._lock, self.restarts = Rcon(self), threading.Lock(), 0
 
     def start(self, _rates):
+        self.running = self.desired_up = True
         self.sup.events.append((self.sup.clock.t, self.name, "start"))
 
     def wait_ready(self, timeout, _abort=None):
@@ -68,7 +71,15 @@ class Server:
         return True
 
     def stop(self, _fixes, _save_timeout, deadline=None):
+        self.running = self.desired_up = False
         self.sup.events.append((self.sup.clock.t, self.name, "stop"))
+
+    def _kill(self):
+        self.running = False
+        self.sup.events.append((self.sup.clock.t, self.name, "kill"))
+
+    def _wait_exit(self, _timeout):
+        return True
 
 
 def make(names, duration=300, batch=1, stopped=()):
@@ -81,24 +92,27 @@ def make(names, duration=300, batch=1, stopped=()):
     sv.stopping, sv._rolling_cancel = threading.Event(), threading.Event()
     sv._rolling_lock, sv.lifecycle = threading.Lock(), threading.Lock()
     sv._base_mods, sv.startup = None, None
+    sv.held, sv._together = set(), set()
     sv.clock = Clock()
     sv._clock, sv._tick = sv.clock, sv.clock.tick
-    sv.events, sv.restarts = [], []
+    sv.events, sv.restarts, sv.outcomes, sv.rcon_delay = [], [], {}, 0
     sv.maps = {n: Server(sv, n, n not in stopped) for n in names}
     sv._mod_updates = lambda: []
 
-    def restart_map(server):
+    def rolling_one(server, outcome):
+        """Restart mapy v rolling restartu: trva `duration`, vysledek z sv.outcomes."""
         sv.restarts.append((sv.clock.t, server.name))
         sv.events.append((sv.clock.t, server.name, "restart"))
+        outcome[server.name] = sv.outcomes.get(server.name, True)
         return Worker(sv.clock, sv.clock.t + duration)
 
     def spawn(target, *args):
-        if getattr(target, "__name__", "") == "restart_map":
+        if getattr(target, "__name__", "") == "rolling_one":
             return target(*args)
         target(*args)
         return Done()
 
-    sv.restart_map = restart_map
+    sv._rolling_one = rolling_one
     sv._spawn = spawn
     return sv
 
@@ -172,26 +186,27 @@ class RollingTest(unittest.TestCase):
 
     def test_map_stopped_by_operator_during_countdown(self):
         sv = make(["A", "B", "C"])
-        inner = sv.restart_map
+        inner = sv._rolling_one
 
-        def restart_map(server):
-            sv.maps["B"].desired_up = False
-            return inner(server)
+        def rolling_one(server, outcome):
+            sv.held.add("B")
+            sv.maps["B"].stop(None, None)
+            return inner(server, outcome)
 
-        sv.restart_map = restart_map
+        sv._rolling_one = rolling_one
         self.run_rolling(sv, 15)
         self.assertEqual([n for _, n in sv.restarts], ["A", "C"])
         self.assertEqual(warnings(sv, "B"), [(420, 15)])
 
     def test_cancel_lets_running_restart_finish(self):
         sv = make(["A", "B", "C"], duration=300)
-        inner = sv.restart_map
+        inner = sv._rolling_one
 
-        def restart_map(server):
+        def rolling_one(server, outcome):
             sv._rolling_cancel.set()
-            return inner(server)
+            return inner(server, outcome)
 
-        sv.restart_map = restart_map
+        sv._rolling_one = rolling_one
         self.run_rolling(sv, 1)
         self.assertEqual([n for _, n in sv.restarts], ["A"])
         self.assertGreaterEqual(sv.clock.t, 60 + 300, "zamek pusten pred dobehnutim restartu")
@@ -214,6 +229,75 @@ class RollingTest(unittest.TestCase):
         self.assertEqual(calls, [["A", "B"]])
         self.assertEqual(sv.restarts, [])
 
+    def test_failed_restart_stops_cycle(self):
+        sv = make(["A", "B", "C"])
+        sv.outcomes["A"] = False
+        with mock.patch.object(sup, "log") as log, mock.patch.object(sup, "emit"):
+            self.assertTrue(sv._rolling_lock.acquire(blocking=False))
+            sv._rolling_restart(5)
+        self.assertEqual([n for _, n in sv.restarts], ["A"])
+        self.assertTrue(any("nenabehla" in c[0][0] for c in log.call_args_list))
+        self.assertNotIn(1, [m for _, m in warnings(sv, "B")])
+
+    def test_restart_skipped_by_operator_continues_cycle(self):
+        sv = make(["A", "B", "C"])
+        sv.outcomes["A"] = None
+        self.run_rolling(sv, 5)
+        self.assertEqual([n for _, n in sv.restarts], ["A", "B", "C"])
+
+    def test_slow_rcon_keeps_promises(self):
+        for minutes in (1, 5, 15):
+            for duration in (300, 600):
+                with self.subTest(minutes=minutes, duration=duration):
+                    sv = make(["A", "B", "C"], duration)
+                    sv.rcon_delay = 15
+                    self.run_rolling(sv, minutes)
+                    self.check_invariants(sv, minutes, duration)
+
+    def test_mod_update_during_cycle_stops_before_next_map(self):
+        sv = make(["A", "B", "C"])
+        answers = iter([[], ["731604991"]])
+        sv._mod_updates = lambda: next(answers, ["731604991"])
+        self.run_rolling(sv, 5)
+        self.assertEqual([n for _, n in sv.restarts], ["A"])
+        self.assertNotIn(1, [m for _, m in warnings(sv, "B")])
+
+    def test_event_apply_with_mod_update_does_nothing(self):
+        sv = make(["A", "B"])
+        sv._mod_updates = lambda: ["731604991"]
+        sv.start_all = lambda servers=None: self.fail("bez odpoctu se mapy naraz nerestartuji")
+        self.run_rolling(sv, 0)
+        self.assertEqual([e for e in sv.events if e[2] in ("stop", "restart")], [])
+
+    def test_together_leaves_operator_stopped_map_down(self):
+        sv = make(["A", "B"])
+        sv._mod_updates = lambda: ["731604991"]
+        calls = []
+        sv.start_all = lambda servers=None: calls.append([s.name for s in servers])
+
+        def tick():
+            sv.clock.tick()
+            if sv.clock.t == 100:                  # obsluha: stop B
+                sv.held.add("B")
+                sv.maps["B"].stop(None, None)
+
+        sv._tick = tick
+        self.run_rolling(sv, 15)
+        self.assertEqual(warnings(sv, "B"), [(0, 15)])
+        self.assertNotIn((900, "B", "stop"), sv.events)
+        self.assertEqual(calls, [["A"]])
+
+    def test_together_kills_map_that_did_not_stop(self):
+        sv = make(["A", "B"])
+        sv._mod_updates = lambda: ["731604991"]
+        calls = []
+        sv.start_all = lambda servers=None: calls.append([s.name for s in servers])
+        sv.maps["A"].stop = lambda *a, **k: None          # stop selhal, mapa bezi dal
+        self.run_rolling(sv, 1)
+        self.assertIn((60, "A", "kill"), sv.events)
+        self.assertEqual(calls, [["A", "B"]])
+        self.assertEqual(sv._together, set())
+
     def test_second_rolling_is_refused(self):
         sv = make(["A"])
         with mock.patch.object(sup, "log") as log:
@@ -228,7 +312,7 @@ class RollingTest(unittest.TestCase):
         with mock.patch.object(sup, "log"):
             for raw in ("rolling", "rolling 5", "rolling 0", "rolling -3", "rolling x"):
                 sv.handle(raw)
-        self.assertEqual(seen, [15, 5, 0, 0])
+        self.assertEqual(seen, [15, 5, 0])
 
     def test_warning_text_is_ascii_and_keeps_braces(self):
         sv = make(["A"])
@@ -236,6 +320,51 @@ class RollingTest(unittest.TestCase):
         with mock.patch.object(sup, "emit"):
             sv._warn([sv.maps["A"]], 5)
         self.assertEqual(sv.events[-1][2], "Broadcast Restart mapy za 5 min {hned}.")
+
+
+class RestartMapTest(unittest.TestCase):
+    def setUp(self):
+        for name in ("write_shared_config", "log", "emit"):
+            patcher = mock.patch.object(sup, name)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def restart(self, sv, name):
+        return sup.Supervisor.restart_map(sv, sv.maps[name])
+
+    def test_ready_and_not_ready(self):
+        sv = make(["A"])
+        self.assertIs(self.restart(sv, "A"), True)
+        sv.maps["A"].wait_ready = lambda timeout, abort=None: False
+        self.assertIs(self.restart(sv, "A"), False)
+
+    def test_operator_stop_during_restart_keeps_map_down(self):
+        sv = make(["A"])
+        inner = sv.maps["A"].stop
+
+        def stop(*args, **kw):
+            sv.held.add("A")                       # 'stop A' prisel behem restartu
+            inner(*args, **kw)
+
+        sv.maps["A"].stop = stop
+        self.assertIsNone(self.restart(sv, "A"))
+        self.assertNotIn("start", [e for _, _, e in sv.events])
+
+    def test_operator_commands(self):
+        sv = make(["A"])
+        sv._stop_one("A")
+        self.assertIn("A", sv.held)
+        with sv.maps["A"]._lock:                   # s mapou se prave pracuje
+            sv._start_one("A")
+        self.assertNotIn("start", [e for _, _, e in sv.events])
+        sv._together = {"A"}
+        sv._start_one("A")
+        sv._restart_one("A")
+        self.assertNotIn("start", [e for _, _, e in sv.events])
+        sv._together = set()
+        sv._start_one("A")
+        self.assertNotIn("A", sv.held)
+        self.assertIn("start", [e for _, _, e in sv.events])
 
 
 class StartAllTest(unittest.TestCase):
@@ -256,30 +385,43 @@ class StartAllTest(unittest.TestCase):
             last = "start" if what == "start" else "wait"
         return out + [current]
 
-    def test_batch_1_starts_one_by_one_without_api(self):
+    def test_batch_1_starts_one_by_one(self):
         sv = make(list("ABCD"))
-        sv._start_alone = lambda: self.fail("u Start Batch 1 se nic nezjistuje")
+        sv._start_alone = lambda: (None, False)
         sv._mods_pending = lambda: []
         sv.start_all()
         self.assertEqual(self.groups(sv), [["A"], ["B"], ["C"], ["D"]])
+        self.assertNotIn(f"wait {sv.MOD_INSTALL_TIMEOUT}", [e for _, _, e in sv.events])
+
+    def test_mod_update_gives_first_map_install_timeout(self):
+        for batch in (1, 3):
+            with self.subTest(batch=batch):
+                sv = make(list("ABCD"), batch=batch)
+                sv._start_alone = lambda: ("mody 1 maji na Workshopu novou verzi", True)
+                sv._mods_pending = lambda: []
+                sv.start_all()
+                self.assertEqual(self.groups(sv)[0], ["A"])
+                waits = [(n, e) for _, n, e in sv.events if e.startswith("wait")]
+                self.assertEqual(waits[0], ("A", f"wait {sv.MOD_INSTALL_TIMEOUT}"))
+                self.assertTrue(all(e == "wait 600" for _, e in waits[1:]))
 
     def test_batch_3(self):
         sv = make(list("ABCDEFG"), batch=3)
-        sv._start_alone = lambda: None
+        sv._start_alone = lambda: (None, False)
         sv._mods_pending = lambda: []
         sv.start_all()
         self.assertEqual(self.groups(sv), [["A", "B", "C"], ["D", "E", "F"], ["G"]])
 
     def test_first_alone_then_batches(self):
         sv = make(list("ABCDEFG"), batch=3)
-        sv._start_alone = lambda: "mody maji na Workshopu novou verzi"
+        sv._start_alone = lambda: ("GameUserSettings.ini zalozi az prvni mapa", False)
         sv._mods_pending = lambda: []
         sv.start_all()
         self.assertEqual(self.groups(sv), [["A"], ["B", "C", "D"], ["E", "F", "G"]])
 
     def test_pending_mods_start_alone_with_long_timeout(self):
         sv = make(list("ABCD"), batch=3)
-        sv._start_alone = lambda: None
+        sv._start_alone = lambda: (None, False)
         pending = [["111"], []]
         sv._mods_pending = lambda: pending.pop(0) if pending else []
         sv.start_all()
@@ -288,14 +430,14 @@ class StartAllTest(unittest.TestCase):
 
     def test_subset(self):
         sv = make(list("ABC"), batch=3)
-        sv._start_alone = lambda: None
+        sv._start_alone = lambda: (None, False)
         sv._mods_pending = lambda: []
         sv.start_all([sv.maps["A"], sv.maps["C"]])
         self.assertEqual(self.groups(sv), [["A", "C"]])
 
     def test_stopping_stops_before_next_group(self):
         sv = make(list("ABCD"), batch=2)
-        sv._start_alone = lambda: None
+        sv._start_alone = lambda: (None, False)
         sv._mods_pending = lambda: []
         first_wait = sv.maps["A"].wait_ready
 
@@ -373,18 +515,18 @@ class ModUpdatesTest(unittest.TestCase):
         with mock.patch.object(sup, "workshop_updated", side_effect=OSError("timeout")), \
                 mock.patch.object(sup, "log"):
             self.assertIsNone(sv._mod_updates())
-            self.assertEqual(sv._start_alone(), "aktualizace modu nejde overit")
+            self.assertEqual(sv._start_alone(), ("aktualizace modu nejde overit", False))
 
     def test_start_alone_reasons(self):
         sv = self.make([])
         sv._mod_updates = lambda: []
-        self.assertIsNone(sv._start_alone())
+        self.assertEqual(sv._start_alone(), (None, False))
         sv.cfg.gus_extra = "AllowCaveBuildingPvE=True"
-        self.assertIn("GameUserSettings", sv._start_alone())
+        self.assertEqual(sv._start_alone(), ("GameUserSettings.ini zalozi az prvni mapa", False))
         (sv.cfg.config_dir / "GameUserSettings.ini").write_text("[ServerSettings]\n")
-        self.assertIsNone(sv._start_alone())
+        self.assertEqual(sv._start_alone(), (None, False))
         sv._mod_updates = lambda: ["1"]
-        self.assertIn("novou verzi", sv._start_alone())
+        self.assertEqual(sv._start_alone(), ("mody 1 maji na Workshopu novou verzi", True))
 
 
 if __name__ == "__main__":

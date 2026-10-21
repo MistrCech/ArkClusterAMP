@@ -134,9 +134,15 @@ konzole `rolling 15`:
   ostatní běžící mapy. Supervisor proto před kolem porovná verze z
   `appworkshop_346110.acf` (SteamCMD, kterým si mapy módy stahují) s Workshopem
   (Steam Web API, bez klíče); když je novější, odpočet běží na všech mapách a
-  restartují se spolu. Když se to ověřit nedá (síť), jde se po mapách.
-- `rolling stop` kolo zastaví, rozběhnutý restart mapy doběhne. `rolling 0` = bez
-  odpočtu (tak restartuje `event apply`).
+  restartují se spolu. Když se to ověřit nedá (síť), jde se po mapách. Když se
+  aktualizace objeví až během kola, kolo se před další mapou zastaví a příští
+  `rolling` restartuje mapy naráz. Bez odpočtu (`rolling 0`, `event apply`) se
+  mapy s aktualizací módů nerestartují vůbec — hráči by spadli bez varování.
+- **mapa, která po restartu nenaběhne, kolo zastaví** — ostatní běží dál. Společná
+  příčina (update hry, rozbitá konfigurace) by jinak shodila mapu po mapě celý cluster.
+- `stop <mapa>` během kola vyhrává: mapa se přeskočí, a když se zrovna restartuje,
+  zůstane dole. `rolling stop` kolo zastaví, rozběhnutý restart mapy doběhne.
+  `rolling 0` = bez odpočtu (tak restartuje `event apply`).
 - Event od Wildcardu (ASA) se vybírá i před každým kolem, takže začátek i konec
   eventu vezme i denní restart po mapách.
 
