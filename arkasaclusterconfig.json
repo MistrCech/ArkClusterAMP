@@ -452,6 +452,38 @@
         "MaxValue": "900"
     },
     {
+        "DisplayName": "Start Batch",
+        "Category": "ARK Cluster:hub",
+        "Subcategory": "Supervisor:settings:5",
+        "Description": "Kolik map startuje naraz pri plnem startu (update hry, start instance). 1 = jedna po druhe, 10 map tak startuje pres hodinu; 3 = o zhruba dve tretiny kratsi. Prvni mapa jde sama, kdyz se stahuji mody nebo jde o cistou instalaci. Prodleva vyse plati mezi skupinami.",
+        "Keywords": "batch,start,parallel",
+        "FieldName": "StartBatch",
+        "InputType": "number",
+        "IsFlagArgument": false,
+        "ParamFieldName": "StartBatch",
+        "IncludeInCommandLine": false,
+        "DefaultValue": "1",
+        "EnumValues": {},
+        "Placeholder": "1",
+        "Suffix": "maps",
+        "MinValue": "1",
+        "MaxValue": "10"
+    },
+    {
+        "DisplayName": "Restart Warning",
+        "Category": "ARK Cluster:hub",
+        "Subcategory": "Supervisor:settings:5",
+        "Description": "Varovani hracum pred restartem z prikazu 'rolling' (15, 5 a 1 minutu predem, kazda mapa svuj odpocet). {minutes} = zbyvajici minuty. Jen ASCII - diakritiku supervisor odstrani.",
+        "Keywords": "restart,warning,rolling,broadcast",
+        "FieldName": "RestartWarning",
+        "InputType": "text",
+        "IsFlagArgument": false,
+        "ParamFieldName": "RestartWarning",
+        "IncludeInCommandLine": false,
+        "DefaultValue": "Server restart in {minutes} min.",
+        "EnumValues": {}
+    },
+    {
         "DisplayName": "Ready Timeout",
         "Category": "ARK Cluster:hub",
         "Subcategory": "Supervisor:settings:5",

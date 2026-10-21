@@ -24,6 +24,8 @@ import sys
 import threading
 import time
 import unicodedata
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 from discordbridge import DiscordBridge, escape_markdown
@@ -355,6 +357,11 @@ class Config:
         self.server_password = env("ARK_SERVER_PASSWORD")
         self.max_players = env_int("ARK_MAX_PLAYERS", 70)
         self.start_delay = env_int("ARK_START_DELAY", 90)
+        # Kolik map startuje naraz pri plnem startu - viz start_all.
+        self.start_batch = max(1, env_int("ARK_START_BATCH", 1))
+        # Varovani hracum pred restartem mapy, {minutes} = zbyvajici minuty.
+        self.restart_warning = (env("ARK_RESTART_WARNING")
+                                or "Server restart in {minutes} min.")
         self.ready_timeout = env_int("ARK_READY_TIMEOUT", 600)
         self.save_timeout = env_int("ARK_SAVE_TIMEOUT", 180)
         self.cpu_pinning = env_bool("ARK_CPU_PINNING")
@@ -644,8 +651,8 @@ def resolve_event(choice, events, today, game=None):
 
     choice: "off", "official" (kalendar z events.json, jako oficialni servery)
     nebo klic eventu (rucni volba). events: obsah events.json. today: datetime.date.
-    Event se vybira pri startu clusteru, takze zacatek i konec eventu vezme
-    nejblizsi restart (denni restart v AMP) - bez vlastniho planovani restartu.
+    Event se vybira pri startu clusteru a pred rolling restartem, takze zacatek
+    i konec eventu vezme denni restart - bez vlastniho planovani restartu.
     """
     game = game or GAME
     defs = (events.get("events") or {}).get(game) or {}
@@ -693,6 +700,36 @@ def plan_event(choice, events, today, seen, mods, game=None):
     out = list(dict.fromkeys(out))
     args = [a for a in (detail.get("args") or []) if a.startswith("-") and '"' not in a] if key else []
     return {"mods": out, "passive": passive, "args": args, "active": key, "detail": detail, "seen": seen}
+
+
+# Verze modu na Steam Workshopu - Web API bez klice.
+WORKSHOP_DETAILS = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
+
+
+def workshop_installed(text):
+    """{id: timeupdated} ze sekce WorkshopItemsInstalled souboru appworkshop_346110.acf."""
+    start = text.find('"WorkshopItemsInstalled"')
+    if start == -1:
+        return {}
+    end = text.find('"WorkshopItemDetails"', start)
+    out = {}
+    for mod, body in re.findall(r'"(\d+)"\s*\{([^{}]*)\}', text[start:end if end != -1 else None]):
+        found = re.search(r'"timeupdated"\s*"(\d+)"', body)
+        if found:
+            out[mod] = int(found.group(1))
+    return out
+
+
+def workshop_updated(mods, timeout=20):
+    """{id: time_updated} z Workshopu. Vyjimka (sit, JSON) = nevime."""
+    fields = [("itemcount", str(len(mods)))]
+    fields += [(f"publishedfileids[{i}]", mod) for i, mod in enumerate(mods)]
+    request = urllib.request.Request(WORKSHOP_DETAILS,
+                                     data=urllib.parse.urlencode(fields).encode())
+    with urllib.request.urlopen(request, timeout=timeout) as reply:
+        details = json.load(reply)["response"]["publishedfiledetails"]
+    return {str(d["publishedfileid"]): int(d.get("time_updated") or 0)
+            for d in details if d.get("result") == 1}
 
 
 class State:
@@ -1531,6 +1568,13 @@ class Supervisor:
         # startuje start_all nebo hlidac - takova mapa by prezila supervisor.
         self.lifecycle = threading.Lock()
         self._rolling_lock = threading.Lock()
+        self._rolling_cancel = threading.Event()
+        # Hodiny rolling restartu - testy je podstrci.
+        self._clock = time.time
+        self._tick = lambda: self.stopping.wait(1.0)
+        self._spawn = self._thread
+        # Mody z nastaveni bez modu eventu - viz plan_events.
+        self._base_mods = None
         self.startup = None
         # DiscordBridge, kdyz je nastaveny token i kanal - viz main().
         self.discord = None
@@ -1543,6 +1587,12 @@ class Supervisor:
             self.maps[name] = MapServer(name, index, cfg, cores.get(name))
             if PROFILE["chat_source"] == "log":
                 self.maps[name].chat_sink = self._queue_chat
+
+    @staticmethod
+    def _thread(target, *args):
+        thread = threading.Thread(target=target, args=args, daemon=True)
+        thread.start()
+        return thread
 
     # --- presety ---
 
@@ -1560,6 +1610,30 @@ class Supervisor:
             out += list(entry.get("destructive", []))
         return out
 
+    def plan_events(self):
+        """Event od Wildcardu na dnesek - pri startu clusteru a pred kazdym
+        rolling restartem, aby zacatek i konec eventu vzal i denni restart po mapach."""
+        if not PROFILE.get("events"):
+            return
+        if self._base_mods is None:
+            self._base_mods = list(self.cfg.mods)
+        seen = self.state.data.get("events_seen", [])
+        plan = plan_event(self.cfg.event, load_json(HERE / "events.json", {}),
+                          datetime.date.today(), seen, self._base_mods)
+        self.cfg.mods, self.cfg.passive_mods, self.cfg.event_args = (
+            plan["mods"], plan["passive"], plan["args"])
+        if plan["seen"] != seen:
+            self.state.data["events_seen"] = plan["seen"]
+            self.state.save()
+        if plan["active"]:
+            d = plan["detail"]
+            log(f"Event: {d.get('name', plan['active'])} "
+                f"(mody {', '.join(_event_mod_ids(d)) or '-'}, prepinace {' '.join(plan['args']) or '-'})")
+        elif self.cfg.event.lower() not in ("", "off", "none"):
+            log(f"Event: {plan['detail']}")
+        if plan["passive"]:
+            log(f"Pasivni mody po eventech (kvuli predmetum z eventu): {', '.join(plan['passive'])}")
+
     # --- zivotni cyklus ---
 
     def _safe_start(self, server):
@@ -1576,41 +1650,106 @@ class Supervisor:
             emit(server.name, f"CHYBA: start selhal: {exc}")
             return False
 
-    def start_all(self):
+    def start_all(self, servers=None):
+        """Nastartuje mapy (vychozi vsechny) po skupinach Start Batch.
+
+        13 map za sebou trvalo pres hodinu. Prvni mapa jde sama, kdyz by
+        soubezny start mohl rozbit sdilene soubory (viz _start_alone) - u 13
+        map po 3 to cas nepridava, skupin je 5 tak jako tak.
+        """
+        servers = list(self.maps.values()) if servers is None else list(servers)
         preset = self.state.apply_pending()
         try:
             write_shared_config(self.cfg, self.presets, preset)
         except OSError as exc:
             log(f"CHYBA: konfiguraci nejde pripravit: {exc}")
-        log(f"Startuji {len(self.maps)} map, preset '{preset}', "
-            f"prodleva {self.cfg.start_delay} s mezi mapami")
-        for position, server in enumerate(self.maps.values()):
+        batch = self.cfg.start_batch
+        log(f"Startuji {len(servers)} map" + (f" po {batch}" if batch > 1 else "")
+            + f", preset '{preset}', prodleva {self.cfg.start_delay} s mezi "
+            + ("skupinami" if batch > 1 else "mapami"))
+        alone = self._start_alone() if batch > 1 and len(servers) > 1 else None
+        if alone:
+            log(f"{servers[0].name} startuje sama: {alone}")
+        position = 0
+        while position < len(servers):
             if position:
                 # Na cisty instalaci soubor vytvori az prvni mapa.
                 patch_gus(self.cfg)
             pending = self._mods_pending()
             if pending:
-                log(f"mody {', '.join(pending)} nejsou nainstalovane - {server.name} je "
+                log(f"mody {', '.join(pending)} nejsou nainstalovane - {servers[position].name} je "
                     f"nainstaluje a dalsi mapa pocka (limit {self.MOD_INSTALL_TIMEOUT} s "
                     f"misto {self.cfg.ready_timeout} s)")
+            size = 1 if pending or (alone and not position) else batch
+            group = servers[position:position + size]
+            position += len(group)
+            started = []
             # Poradi zamku vsude stejne: lifecycle -> zamek mapy.
             with self.lifecycle:
                 if self.stopping.is_set():
                     return
-                started = self._safe_start(server)
+                for server in group:
+                    if self._safe_start(server):
+                        started.append(server)
             # wait_ready zamerne MIMO zamek - blokuje az ready_timeout a
             # nesmi tim drzet pripadne vypinani.
-            if started:
-                server.wait_ready(self.MOD_INSTALL_TIMEOUT if pending else self.cfg.ready_timeout,
-                                  self.stopping)
-            # Prodleva az mezi mapami, ne po posledni.
-            if position < len(self.maps) - 1 and self.cfg.start_delay:
-                log(f"cekam {self.cfg.start_delay} s pred dalsi mapou")
+            self._wait_ready_all(started, self.MOD_INSTALL_TIMEOUT if pending
+                                 else self.cfg.ready_timeout)
+            # Prodleva az mezi skupinami, ne po posledni.
+            if position < len(servers) and self.cfg.start_delay:
+                log(f"cekam {self.cfg.start_delay} s pred dalsi "
+                    + ("skupinou" if batch > 1 else "mapou"))
                 self.stopping.wait(self.cfg.start_delay)
         log("vsechny mapy nastartovany")
 
+    def _wait_ready_all(self, servers, timeout):
+        """wait_ready skupiny - ceka se na nejpomalejsi mapu, ne na soucet."""
+        threads = [self._spawn(server.wait_ready, timeout, self.stopping) for server in servers]
+        for thread in threads:
+            thread.join()
+
+    def _start_alone(self):
+        """Proc musi prvni mapa plneho startu startovat sama, nebo None.
+
+        Mapy sdileji jednu instalaci. ASE s -AutoManagedMods pri startu mody
+        stahuje a rozbaluje - dve mapy naraz tak 7. 10. 2026 nechaly 4 ze 7
+        modu bez .mod. GameUserSettings.ini na ciste instalaci zalozi az prvni mapa.
+        """
+        if self.cfg.mods and GAME != "ase":
+            return "mody si stahuje mapa pri startu"
+        updates = self._mod_updates()
+        if updates is None:
+            return "aktualizace modu nejde overit"
+        if updates:
+            return f"mody {', '.join(updates)} maji na Workshopu novou verzi"
+        if gus_entries(self.cfg.gus_extra) and not (
+                self.cfg.config_dir / "GameUserSettings.ini").exists():
+            return "GameUserSettings.ini zalozi az prvni mapa"
+        return None
+
     # Prvni start s ~1 GB modu trval 13 min (ASE, 7. 10. 2026).
     MOD_INSTALL_TIMEOUT = 7200
+
+    def _mod_updates(self):
+        """ASE: mody s novejsi verzi na Workshopu, nez je stazena; None = nejde zjistit.
+
+        Mapa s -AutoManagedMods novou verzi pri startu stahne a rozbali do
+        Content/Mods - pres soubory, ktere maji nactene ostatni bezici mapy.
+        Stazene verze zapisuje do acf SteamCMD, ktery k tomu mapy pouzivaji
+        (na testu odpovidaly Workshopu u vsech 7 modu, 21. 10. 2026).
+        """
+        if GAME != "ase" or not self.cfg.mods:
+            return []
+        acf = (self.cfg.game / "Engine/Binaries/ThirdParty/SteamCMD"
+               / ("Win64" if IS_WINDOWS else "Linux")
+               / "steamapps/workshop/appworkshop_346110.acf")
+        try:
+            local = workshop_installed(acf.read_text(encoding="utf-8", errors="replace"))
+            remote = workshop_updated(self.cfg.mods)
+        except Exception as exc:  # noqa: BLE001 - sit, JSON, chybejici soubor
+            log(f"VAROVANI: aktualizace modu nejde overit: {exc}")
+            return None
+        return [mod for mod in self.cfg.mods if remote.get(mod, 0) > local.get(mod, 0)]
 
     def _mods_pending(self):
         """ASE: mody, ktere jeste nejsou rozbalene v Content/Mods (chybi <id>.mod).
@@ -1979,6 +2118,8 @@ class Supervisor:
             self.cmd_whereis(args[0])
         elif cmd == "event":
             self.cmd_event(args)
+        elif cmd == "rolling":
+            self.cmd_rolling(args)
         elif cmd == "quiesce":
             self.cmd_quiesce(True)
         elif cmd == "dequiesce":
@@ -1998,6 +2139,8 @@ class Supervisor:
             "kick|ban <hrac>       supervisor mapu dohleda sam",
             "whereis <hrac>",
             "event list|status|set <preset>|apply",
+            "rolling [minuty]      restart mapu po mape, kazda s odpoctem (vychozi 15)",
+            "rolling stop          zastavi ho, rozbehnuty restart mapy dobehne",
             "quiesce | dequiesce   zaloha za behu z AMP (save je atomicky)",
             "DoExit                korektni ukonceni celeho clusteru",
         ]:
@@ -2006,7 +2149,8 @@ class Supervisor:
     def cmd_status(self):
         log(f"preset '{self.state.preset}'"
             + (f", ceka '{self.state.pending}' na pristi restart"
-               if self.state.pending else ""))
+               if self.state.pending else "")
+            + (", bezi rolling restart" if self._rolling_lock.locked() else ""))
         for server in self.maps.values():
             if server.running:
                 state = "ready" if server.ready else "startuje"
@@ -2132,11 +2276,8 @@ class Supervisor:
                 log(f"  {name}{marker}")
             return
         if args[0] == "apply":
-            if not self._rolling_lock.acquire(blocking=False):
-                log("rolling restart uz bezi, ignoruji")
-                return
-            log("aplikuji preset rolling restartem, mapa po mape")
-            threading.Thread(target=self._rolling_restart, daemon=True).start()
+            if self._start_rolling(0):
+                log("aplikuji preset rolling restartem, mapa po mape")
             return
         if args[0] == "set" and len(args) > 1:
             name = args[1]
@@ -2149,17 +2290,168 @@ class Supervisor:
             return
         log("pouziti: event list | status | set <preset> | apply")
 
-    def _rolling_restart(self):
+    # --- rolling restart ---
+
+    # Odhad, za jak dlouho po sobe pujdou mapy dolu: uklid, ulozeni a start
+    # 4-5 min (test 20. 10. 2026) plus posledni minuta varovani. Jen pro
+    # planovani varovani - dalsi mapa jde dolu az po nabehnuti predchozi.
+    ROLLING_SLOT = 420
+    # Minuty pred restartem mapy, kdy dostane varovani. Posledni minutu hlasi
+    # vzdy, az ve chvili, kdy je mapa opravdu na rade.
+    WARN_AT = (15, 5)
+
+    def cmd_rolling(self, args):
+        if args and args[0].lower() in ("stop", "cancel"):
+            if self._rolling_lock.locked():
+                self._rolling_cancel.set()
+                log("rolling restart se zastavi - rozbehnuty restart mapy dobehne")
+            else:
+                log("rolling restart nebezi")
+            return
         try:
-            for server in self.maps.values():
-                if self.stopping.is_set():
-                    return
-                if not server.running:
+            minutes = int(args[0]) if args else 15
+        except ValueError:
+            log("pouziti: rolling [minuty] | rolling stop")
+            return
+        self._start_rolling(max(0, minutes))
+
+    def _start_rolling(self, minutes):
+        if self.startup is not None and self.startup.is_alive():
+            log("cluster jeste startuje, rolling restart neprovedeny")
+            return False
+        if not self._rolling_lock.acquire(blocking=False):
+            log("rolling restart uz bezi, ignoruji")
+            return False
+        self._rolling_cancel.clear()
+        self._spawn(self._rolling_restart, minutes)
+        return True
+
+    def _warn_points(self, minutes):
+        """Minuty planovanych varovani, napr. 15 -> [15, 5]. Posledni minuta zvlast."""
+        return [minutes] + [m for m in self.WARN_AT if m < minutes] if minutes > 1 else []
+
+    def _warn(self, servers, minutes):
+        text = chat_text(self.cfg.restart_warning.replace("{minutes}", str(minutes)))
+        for server in servers:
+            try:
+                server.rcon.command(f"Broadcast {text}")
+                emit(server.name, f"varovani: restart za {minutes} min")
+            except (RconError, OSError) as exc:
+                emit(server.name, f"varovani o restartu neodeslano: {exc}")
+
+    def _interrupted(self):
+        if self.stopping.is_set():
+            return True
+        if self._rolling_cancel.is_set():
+            log("rolling restart zastaven")
+            return True
+        return False
+
+    def _rolling_restart(self, minutes=0):
+        """Restart map po jedne, ostatni bezi dal; kazda ma vlastni odpocet.
+
+        Dole je vzdy nejvys jedna mapa: dalsi jde dolu, az predchozi nabehne.
+        Varovani se planuji po ROLLING_SLOT, takze se odpocty prekryvaji -
+        zatimco se jedna mapa restartuje, dalsim uz bezi. Kdyz restart trva
+        dele, plan dalsich map se posune; posledni minuta se hlasi az ve
+        chvili, kdy je mapa na rade. Restart tak nikdy neprijde driv, nez
+        hraci slysi.
+        """
+        worker = None
+        try:
+            self.plan_events()
+            servers = [s for s in self.maps.values() if s.running]
+            if not servers:
+                log("rolling restart: zadna mapa nebezi")
+                return
+            updates = self._mod_updates()
+            if updates:
+                log(f"mody {', '.join(updates)} maji na Workshopu novou verzi - pod bezicimi "
+                    f"mapami se rozbalit nesmi, restartuji {len(servers)} map naraz")
+                self._restart_together(servers, minutes)
+                return
+            points = self._warn_points(minutes)
+            first = self._clock() + minutes * 60
+            plan = [first + (i * self.ROLLING_SLOT if minutes else 0) for i in range(len(servers))]
+            told = [None] * len(servers)        # posledni ohlasene minuty
+            log(f"rolling restart {len(servers)} map, mapa po mape"
+                + (f", prvni za {minutes} min" if minutes else ""))
+            k, due, slot, began = 0, None, self.ROLLING_SLOT, None
+            while k < len(servers):
+                if self._interrupted():
+                    break
+                now = self._clock()
+                for j in range(k, len(servers)):
+                    left = plan[j] - now
+                    if (j == k and due is not None) or left <= 60 or not servers[j].desired_up:
+                        continue
+                    hits = [m for m in points if left <= m * 60]
+                    if hits and (told[j] is None or min(hits) < told[j]):
+                        told[j] = min(hits)
+                        self._warn([servers[j]], told[j])
+                if worker is not None and worker.is_alive():
+                    # Restart predchozi mapy trva dele, nez se cekalo - plan
+                    # vsech dalsich se posouva hned, ne az pri jejich rade.
+                    late = now + 60 - plan[k]
+                    for j in range(k, len(servers)):
+                        plan[j] += max(0, late)
+                    self._tick()
                     continue
-                self.restart_map(server)
-            log("rolling restart hotov")
+                if worker is not None:
+                    # Dalsi mapy planuje podle toho, jak dlouho trval posledni restart.
+                    slot = max(self.ROLLING_SLOT, now - began + 60)
+                worker = None
+                server = servers[k]
+                if not server.desired_up:          # mezitim zastavena obsluhou
+                    k, due = k + 1, None
+                    continue
+                if due is None:
+                    if minutes and now < plan[k] - 60:
+                        self._tick()
+                        continue
+                    due = now + 60 if minutes else now
+                    if minutes:
+                        self._warn([server], 1)
+                    # Plan jen dopredu - nikdo nesmi prijit o cas, ktery uz slysel.
+                    for j in range(k + 1, len(servers)):
+                        plan[j] = max(plan[j] + max(0, due - plan[k]), due + (j - k) * slot)
+                if now < due:
+                    self._tick()
+                    continue
+                k, due, began = k + 1, None, now
+                emit(server.name, "rolling restart")
+                worker = self._spawn(self.restart_map, server)
+            # Rozbehnuty restart dobehne pod zamkem - jinak by novy rolling
+            # restart mohl vzit tutez mapu znovu.
+            while worker is not None and worker.is_alive() and not self.stopping.is_set():
+                self._tick()
+            if k == len(servers) and not self.stopping.is_set():
+                log("rolling restart hotov")
         finally:
             self._rolling_lock.release()
+
+    def _restart_together(self, servers, minutes):
+        """Mapy dolu naraz a zpet - aktualizaci modu nesmi nikdo mit nactenou."""
+        points = self._warn_points(minutes) + ([1] if minutes else [])
+        due = self._clock() + minutes * 60
+        told = None
+        while True:
+            if self._interrupted():
+                return
+            left = due - self._clock()
+            if left <= 0:
+                break
+            hits = [m for m in points if left <= m * 60]
+            if hits and (told is None or min(hits) < told):
+                told = min(hits)
+                self._warn(servers, told)
+            self._tick()
+        workers = [self._spawn(s.stop, self.fixes_for(s.name), self.cfg.save_timeout)
+                   for s in servers]
+        for worker in workers:
+            worker.join()
+        if not self.stopping.is_set():
+            self.start_all(servers)
 
     def cmd_quiesce(self, on):
         """Zaloha za behu - AMP vola pres App.QuiesceCommand misto vypnuti.
@@ -2247,21 +2539,7 @@ def main():
     # Kanonicke poradi, ne poradi argumentu - porty musi sedet s ports.json.
     selected.sort(key=CANONICAL_MAPS.index)
     supervisor = Supervisor(cfg, selected)
-    if PROFILE.get("events"):
-        plan = plan_event(cfg.event, load_json(HERE / "events.json", {}), datetime.date.today(),
-                          supervisor.state.data.get("events_seen", []), cfg.mods)
-        cfg.mods, cfg.passive_mods, cfg.event_args = plan["mods"], plan["passive"], plan["args"]
-        if plan["seen"] != supervisor.state.data.get("events_seen", []):
-            supervisor.state.data["events_seen"] = plan["seen"]
-            supervisor.state.save()
-        if plan["active"]:
-            d = plan["detail"]
-            log(f"Event: {d.get('name', plan['active'])} "
-                f"(mody {', '.join(_event_mod_ids(d)) or '-'}, prepinace {' '.join(plan['args']) or '-'})")
-        elif cfg.event.lower() not in ("", "off", "none"):
-            log(f"Event: {plan['detail']}")
-        if plan["passive"]:
-            log(f"Pasivni mody po eventech (kvuli predmetum z eventu): {', '.join(plan['passive'])}")
+    supervisor.plan_events()
 
     # Obsluha signalu smi udelat JEN set(). Puvodne tady bezel cely vypinaci
     # zebrik - kdyz signal prisel ve chvili, kdy preruseny thread drzel

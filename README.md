@@ -18,7 +18,10 @@ mezi nimi postupně rozejde.
 
 - **13 map z jedné instalace** — ~15 GB místo ~195 GB, jeden SteamCMD zápis při updatu
 - **Ovládání po mapách zůstává** — konzole AMP je příkazový kanál (`AdminMethod=STDIO`)
-- **Postupný start** s prodlevou; 13 serverů naráz stroj neustojí
+- **Postupný start** po skupinách (*Start Batch*) s prodlevou; 13 serverů naráz stroj
+  neustojí, jeden po druhém startují přes hodinu
+- **Denní restart po mapách** — `rolling 15`: každá mapa vlastní odpočet (15, 5
+  a 1 minuta), dole je vždy jen jedna, ostatní běží (viz Denní restart)
 - **CPU pinning** — každá mapa vlastní fyzická jádra včetně SMT sourozenců, férový
   díl volných jader v souvislém bloku (když je map víc než jader, dělí se a
   supervisor to ohlásí)
@@ -107,9 +110,41 @@ saveall               SaveWorld vsude (muze RCON map na minuty umlcet)
 kick|ban <hrac|id>    supervisor mapu dohleda sam
 whereis <hrac|id>
 event list|status|set <preset>|apply
+rolling [minuty]      restart mapu po mape, kazda s odpoctem (vychozi 15)
+rolling stop          zastavi ho, rozbehnuty restart mapy dobehne
 quiesce | dequiesce   zaloha za behu z AMP (save je atomicky)
 DoExit                korektni ukonceni celeho clusteru
 ```
+
+## Denní restart
+
+Plný restart (AMP *Restart*, update hry) shodí všechny mapy naráz a 13 map jedna po
+druhé startuje přes hodinu. Na denní restart proto nech plánovač AMP poslat do
+konzole `rolling 15`:
+
+- **mapa po mapě** — každá dostane vlastní odpočet (15, 5 a 1 minutu předem, text
+  z *Restart Warning* přes `Broadcast`) a jde dolů, až předchozí naběhne. Dole je
+  vždy jen jedna, ostatní běží; přechod na mapu, která se zrovna restartuje, ty
+  minuty nejde. Odpočty dalších map běží souběžně, takže mapy jdou dolů zhruba po
+  7 minutách (úklid, uložení, start a poslední minuta varování) — 13 map ~1,5 h.
+- **nikdy dřív, než hráči slyšeli** — když restart trvá déle, plán dalších map se
+  posune a poslední minutu mapa hlásí, až když je opravdu na řadě.
+- **mody s aktualizací → všechny mapy naráz.** ASE s `-AutoManagedMods` si novou
+  verzi módu stáhne a rozbalí při startu mapy — přes soubory, které mají načtené
+  ostatní běžící mapy. Supervisor proto před kolem porovná verze z
+  `appworkshop_346110.acf` (SteamCMD, kterým si mapy módy stahují) s Workshopem
+  (Steam Web API, bez klíče); když je novější, odpočet běží na všech mapách a
+  restartují se spolu. Když se to ověřit nedá (síť), jde se po mapách.
+- `rolling stop` kolo zastaví, rozběhnutý restart mapy doběhne. `rolling 0` = bez
+  odpočtu (tak restartuje `event apply`).
+- Event od Wildcardu (ASA) se vybírá i před každým kolem, takže začátek i konec
+  eventu vezme i denní restart po mapách.
+
+*Start Batch* zkracuje plný start: mapy startují po skupinách, prodleva *Start
+Delay* platí mezi skupinami. S 3 se 13 map vejde do ~25–30 min. **První mapa jde
+sama**, když se stahují módy (ASA vždy, ASE když Workshop má novější verzi nebo to
+nejde ověřit) nebo na čisté instalaci chybí `GameUserSettings.ini` — u 13 map po 3
+to čas nepřidá, skupin je 5 tak jako tak.
 
 ## Eventy
 
@@ -153,8 +188,8 @@ jen nový soubor). Pole *Event* v nastavení instance:
 | Jako oficiální servery | event podle kalendáře v `supervisor/events.json` |
 | konkrétní event | ten event hned při příštím startu |
 
-Event se vybírá **při startu clusteru**, takže začátek i konec eventu vezme denní restart —
-supervisor nic sám nerestartuje. Mod eventu supervisor přidá do `-mods`, k Fear Ascended
+Event se vybírá **při startu clusteru** a před každým `rolling`, takže začátek i konec eventu
+vezme denní restart — supervisor nic sám nerestartuje. Mod eventu supervisor přidá do `-mods`, k Fear Ascended
 i `-HalloweenColors` (barvy divokých dinosaurů), k Anniversary `-ActiveEvent=Birthday`.
 
 **Po konci eventu se mod neodebírá.** Wildcard (patch 33.15) varuje, že odebrání modu může
@@ -187,6 +222,8 @@ Pro jednu konkrétní instanci (bez zásahu do repa) jsou v nastavení AMP:
 | *Game.ini - Extra Lines* | řádky na konec generovaného `Game.ini` (sekce `ShooterGameMode`) |
 | *GameUserSettings.ini - Extra Lines* | klíče, které ARK z příkazové řádky nebere (wiki: CLI No), se sekcemi — např. `AllowCaveBuildingPvE=True`, `[Ragnarok]` + `AllowMultipleTamedUnicorns=True`; supervisor je před každým startem doplní do souboru, který si ARK píše sám |
 | *Rate Preset* | `normal` / `2x` / `4x` / `5x` z `presets.json` |
+| *Start Batch* | kolik map startuje naráz při plném startu (výchozí 1) — viz Denní restart |
+| *Restart Warning* | text varování před restartem, `{minutes}` = zbývající minuty |
 | *Discord Bot Token*, *Discord Channel ID* | most chatu do kanálu na Discordu — viz Chat a Discord |
 | *Discord -> Game Chat* | zprávy z kanálu i do hry (výchozí zapnuto) |
 
