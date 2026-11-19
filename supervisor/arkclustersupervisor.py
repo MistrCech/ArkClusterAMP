@@ -2404,7 +2404,7 @@ class Supervisor:
         minuta se hlasi az ve chvili, kdy je mapa na rade. Restart tak nikdy
         neprijde driv, nez hraci slyseli.
         """
-        worker, outcome, last = None, {}, None
+        worker, outcome, last, broken = None, {}, None, False
         try:
             self.plan_events()
             servers = [s for s in self.maps.values() if s.running and self._wanted(s)]
@@ -2412,14 +2412,19 @@ class Supervisor:
                 log("rolling restart: zadna mapa nebezi")
                 return
             updates = self._mod_updates()
-            if updates:
+            # Chybejici <id>.mod = rozbaleni nedobehlo (napr. mapa novou verzi stahla
+            # pri vlastnim startu pod ostatnimi bezicimi mapami). Dalsi start mapa po mape
+            # skonci stejne - soubory drzi bezici mapy - a mapa nacte svet bez trid modu.
+            pending = self._mods_pending()
+            if updates or pending:
+                why = (f"mody {', '.join(updates)} maji na Workshopu novou verzi" if updates
+                       else f"mody {', '.join(pending)} nejsou rozbalene (chybi .mod)")
                 if not minutes:
-                    log(f"mody {', '.join(updates)} maji na Workshopu novou verzi - pod bezicimi "
-                        f"mapami se rozbalit nesmi a mapy se musi restartovat naraz. Bez odpoctu "
-                        f"to neudelam: 'rolling <minuty>'")
+                    log(f"{why} - pod bezicimi mapami se rozbalit nesmi a mapy se musi "
+                        f"restartovat naraz. Bez odpoctu to neudelam: 'rolling <minuty>'")
                     return
-                log(f"mody {', '.join(updates)} maji na Workshopu novou verzi - pod bezicimi "
-                    f"mapami se rozbalit nesmi, restartuji {len(servers)} map naraz")
+                log(f"{why} - pod bezicimi mapami se rozbalit nesmi, restartuji "
+                    f"{len(servers)} map naraz")
                 self._restart_together(servers, minutes)
                 return
             points = self._warn_points(minutes)
@@ -2469,6 +2474,11 @@ class Supervisor:
                     if minutes and now < plan[k] - 60:
                         self._tick()
                         continue
+                    if k and self._mods_pending():
+                        # Predchozi mapa stahla novou verzi pri startu a nerozbalila ji:
+                        # dalsi mapa by nacetla svet bez trid modu (predmety zmizi).
+                        broken = True
+                        break
                     if k and self._mod_updates():
                         log("mod dostal behem kola aktualizaci - pod bezicimi mapami se rozbalit "
                             "nesmi, rolling restart zastaven (pristi kolo restartuje mapy naraz)")
@@ -2492,7 +2502,23 @@ class Supervisor:
                 return
             if worker is not None and outcome.get(last.name, False) is False:
                 log(f"CHYBA: {last.name} po restartu nenabehla")
-            elif k == len(servers):
+                return
+            if not broken and not self._rolling_cancel.is_set() and k == len(servers):
+                # I posledni mapa kola mohla novou verzi stahnout a nerozbalit.
+                broken = bool(self._mods_pending())
+            if broken:
+                pending = self._mods_pending()
+                rest = [s for s in self.maps.values() if s.running and self._wanted(s)]
+                if not pending or not rest:
+                    return
+                log(f"CHYBA: mody {', '.join(pending)} po restartu {last.name if last else '?'} nejsou rozbalene "
+                    f"(chybi .mod) - mapa po mape se to nespravi, restartuji {len(rest)} map naraz")
+                if minutes:
+                    self._restart_together(rest, minutes)
+                else:
+                    log("bez odpoctu mapy naraz nerestartuji: 'rolling <minuty>'")
+                return
+            if k == len(servers):
                 log("rolling restart hotov")
         finally:
             self._rolling_lock.release()

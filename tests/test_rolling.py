@@ -262,6 +262,45 @@ class RollingTest(unittest.TestCase):
         self.assertEqual([n for _, n in sv.restarts], ["A"])
         self.assertNotIn(1, [m for _, m in warnings(sv, "B")])
 
+    def test_pending_mod_restarts_all_together(self):
+        # 19. 11. 2026: .mod chybi (rozbaleni pod bezicimi mapami nedobehlo), acf uz aktualni
+        sv = make(["A", "B"])
+        sv._mods_pending = lambda: ["3830308980"]
+        calls = []
+        sv.start_all = lambda servers=None: calls.append([s.name for s in servers])
+        self.run_rolling(sv, 15)
+        self.assertEqual(calls, [["A", "B"]])
+        self.assertEqual(sv.restarts, [])
+
+    def test_map_that_failed_to_unpack_switches_to_together(self):
+        # Ragnarok stahl novou verzi pri vlastnim startu a nerozbalil ji: dalsi mapa uz
+        # mapa po mape nejde, vsechny bezici mapy naraz.
+        sv = make(["A", "B", "C"])
+        answers = iter([[], ["3830308980"]])
+        sv._mods_pending = lambda: next(answers, ["3830308980"])
+        calls = []
+        sv.start_all = lambda servers=None: calls.append([s.name for s in servers])
+        self.run_rolling(sv, 5)
+        self.assertEqual([n for _, n in sv.restarts], ["A"])
+        self.assertEqual(calls, [["A", "B", "C"]])
+
+    def test_last_map_failed_to_unpack_switches_to_together(self):
+        sv = make(["A", "B"])
+        answers = iter([[], [], ["3830308980"]])
+        sv._mods_pending = lambda: next(answers, ["3830308980"])
+        calls = []
+        sv.start_all = lambda servers=None: calls.append([s.name for s in servers])
+        self.run_rolling(sv, 5)
+        self.assertEqual([n for _, n in sv.restarts], ["A", "B"])
+        self.assertEqual(calls, [["A", "B"]])
+
+    def test_pending_mod_without_countdown_does_nothing(self):
+        sv = make(["A", "B"])
+        sv._mods_pending = lambda: ["3830308980"]
+        sv.start_all = lambda servers=None: self.fail("bez odpoctu se mapy naraz nerestartuji")
+        self.run_rolling(sv, 0)
+        self.assertEqual([e for e in sv.events if e[2] in ("stop", "restart")], [])
+
     def test_event_apply_with_mod_update_does_nothing(self):
         sv = make(["A", "B"])
         sv._mod_updates = lambda: ["731604991"]
