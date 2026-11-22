@@ -13,8 +13,11 @@ EVENTS = {
     "events": {"asa": {"fear": {"name": "Fear Ascended", "mods": ["877752"], "args": ["-HalloweenColors"]},
                        "winter": {"name": "Winter Wonderland", "mods": ["927090"]},
                        "anniversary": {"name": "Anniversary", "mods": [], "args": ["-ActiveEvent=Birthday"]},
-                       "nomod": {"name": "Bez modu", "mods": []}}},
-    "calendar": [{"event": "fear", "start": "2026-10-20", "end": "2026-11-03"}],
+                       "nomod": {"name": "Bez modu", "mods": []}},
+               "ase": {"winter": {"name": "Winter Wonderland", "mods": [], "args": ["-ActiveEvent=WinterWonderland"]},
+                       "fear": {"name": "Fear Evolved", "mods": [], "args": ["-ActiveEvent=FearEvolved"]}}},
+    "calendar": [{"event": "fear", "start": "2026-10-20", "end": "2026-11-03"},
+                 {"game": "ase", "event": "winter", "start": "2026-12-18", "end": "2027-01-05"}],
 }
 D = datetime.date
 
@@ -41,7 +44,19 @@ class ResolveTest(unittest.TestCase):
         self.assertIsNone(sup.resolve_event("nomod", EVENTS, D(2026, 1, 1), "asa")[0])
 
     def test_other_game_has_no_events(self):
-        self.assertIsNone(sup.resolve_event("fear", EVENTS, D(2026, 10, 25), "ase")[0])
+        self.assertIsNone(sup.resolve_event("fear", EVENTS, D(2026, 10, 25), "unknown")[0])
+
+    def test_ase_calendar_ignores_asa_entries(self):
+        # zaznam bez "game" je ASA: v terminu ASA fear ASE nic nezapne
+        self.assertIsNone(sup.resolve_event("official", EVENTS, D(2026, 10, 25), "ase")[0])
+        self.assertIsNone(sup.resolve_event("official", EVENTS, D(2026, 12, 20), "asa")[0])
+        for day in (D(2026, 12, 18), D(2027, 1, 1), D(2027, 1, 5)):
+            self.assertEqual(sup.resolve_event("official", EVENTS, day, "ase")[0], "winter")
+        self.assertIsNone(sup.resolve_event("official", EVENTS, D(2027, 1, 6), "ase")[0])
+
+    def test_ase_manual(self):
+        key, entry = sup.resolve_event("fear", EVENTS, D(2026, 1, 1), "ase")
+        self.assertEqual((key, entry["args"]), ("fear", ["-ActiveEvent=FearEvolved"]))
 
 
 class PlanTest(unittest.TestCase):
@@ -80,6 +95,13 @@ class PlanTest(unittest.TestCase):
         p = self.plan("anniversary")
         self.assertEqual((p["mods"], p["args"], p["active"]), (self.BASE, ["-ActiveEvent=Birthday"], "anniversary"))
 
+    def test_ase_event_is_args_only(self):
+        p = sup.plan_event("official", EVENTS, D(2026, 12, 24), [], self.BASE, "ase")
+        self.assertEqual((p["mods"], p["passive"], p["args"], p["active"]),
+                         (self.BASE, [], ["-ActiveEvent=WinterWonderland"], "winter"))
+        p = sup.plan_event("official", EVENTS, D(2027, 1, 10), ["winter"], self.BASE, "ase")
+        self.assertEqual((p["mods"], p["passive"], p["args"], p["active"]), (self.BASE, [], [], None))
+
     def test_mod_already_in_base_list(self):
         p = sup.plan_event("off", EVENTS, D(2026, 1, 1), ["fear"], ["877752", "947033"], "asa")
         self.assertEqual(p["mods"], ["877752", "947033"])
@@ -108,10 +130,22 @@ class RepoDataTest(unittest.TestCase):
                 self.assertLess(a["end"], b["start"], (a, b))
 
     def test_template_enum_matches_events(self):
-        cfg = json.loads((ROOT / "arkasaclusterconfig.json").read_text(encoding="utf-8"))
-        field = next(f for f in cfg if f["FieldName"] == "Event")
-        keys = set(field["EnumValues"]) - {"off", "official"}
-        self.assertEqual(keys, set(self.data["events"]["asa"]))
+        for game, name in (("asa", "arkasaclusterconfig.json"), ("ase", "arkclusterconfig.json")):
+            cfg = json.loads((ROOT / name).read_text(encoding="utf-8"))
+            field = next(f for f in cfg if f["FieldName"] == "Event")
+            keys = set(field["EnumValues"]) - {"off", "official"}
+            self.assertEqual(keys, set(self.data["events"][game]), game)
+            self.assertEqual(field["DefaultValue"], "off", game)
+            kvp = (ROOT / name.replace("config.json", ".kvp")).read_text(encoding="utf-8")
+            self.assertIn('"ARK_EVENT":"{{Event}}"', kvp, game)
+
+    def test_ase_events_are_active_event_switches(self):
+        known = {"WinterWonderland", "FearEvolved", "TurkeyTrial", "Easter", "vday", "Summer", "Birthday"}
+        for key, entry in self.data["events"]["ase"].items():
+            self.assertEqual(sup._event_mod_ids(entry), [], key)
+            (arg,) = entry["args"]
+            self.assertTrue(arg.startswith("-ActiveEvent="), key)
+            self.assertIn(arg.split("=", 1)[1], known, key)
 
 
 if __name__ == "__main__":

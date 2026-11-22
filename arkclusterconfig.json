@@ -442,6 +442,30 @@
         }
     },
     {
+        "DisplayName": "Event",
+        "Category": "ARK Cluster:hub",
+        "Subcategory": "Events:date_range:4",
+        "Description": "Svatecni event ASE (prepinac -ActiveEvent, obsah je ve hre). 'Podle kalendare' zapina eventy podle zaznamu ASE v supervisor/events.json - terminy ridi provozovatel. Projevi se pri PRISTIM startu mapy (denni restart).",
+        "Keywords": "event,fear,halloween,winter,christmas,turkey,easter",
+        "FieldName": "Event",
+        "InputType": "enum",
+        "IsFlagArgument": false,
+        "ParamFieldName": "Event",
+        "IncludeInCommandLine": false,
+        "DefaultValue": "off",
+        "EnumValues": {
+            "off": "Vypnuto",
+            "official": "Podle kalendare (events.json)",
+            "fear": "Fear Evolved (Halloween)",
+            "turkey": "Turkey Trial",
+            "winter": "Winter Wonderland",
+            "love": "Love Evolved",
+            "easter": "Eggcellent Adventure",
+            "anniversary": "ARK Anniversary",
+            "summer": "Summer Bash"
+        }
+    },
+    {
         "DisplayName": "Rate Preset",
         "Category": "ARK Cluster:hub",
         "Subcategory": "Events:date_range:4",

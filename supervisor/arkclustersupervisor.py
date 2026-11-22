@@ -65,6 +65,9 @@ GAMES = {
         # Odkud brat chat hracu: "rcon" = GetChat kazdych 5 s, "log" = radky
         # chatu z logu mapy (UTF-8, okamzite). Viz chat_loop.
         "chat_source": "rcon",
+        # Eventy ASE jen prepinacem -ActiveEvent (zadny mod) - viz events.json,
+        # kalendar s "game": "ase" ridi provozovatel, ne Wildcard.
+        "events": True,
     },
     "asa": {
         "app_dir": "2430930",
@@ -651,6 +654,8 @@ def resolve_event(choice, events, today, game=None):
 
     choice: "off", "official" (kalendar z events.json, jako oficialni servery)
     nebo klic eventu (rucni volba). events: obsah events.json. today: datetime.date.
+    Zaznam kalendare bez "game" patri ASA (oficialni terminy Wildcardu); ASE ma
+    vlastni zaznamy s "game": "ase".
     Event se vybira pri startu clusteru a pred rolling restartem, takze zacatek
     i konec eventu vezme denni restart - bez vlastniho planovani restartu.
     """
@@ -662,7 +667,7 @@ def resolve_event(choice, events, today, game=None):
     if choice == "official":
         iso = today.isoformat()
         hits = [c for c in events.get("calendar") or []
-                if c.get("game", game) == game and c.get("start", "9999") <= iso <= c.get("end", "")]
+                if c.get("game", "asa") == game and c.get("start", "9999") <= iso <= c.get("end", "")]
         if not hits:
             return None, "podle kalendare dnes zadny event"
         choice = hits[0]["event"]
@@ -1112,6 +1117,8 @@ class MapServer:
             args += self.cfg.event_args
         else:
             args += ["-AutoManagedMods", "-Crossplay", "-server"]
+            # Event ASE: -ActiveEvent=<jmeno> (WinterWonderland, TurkeyTrial...).
+            args += self.cfg.event_args
         for extra in self.cfg.custom_args.split():
             if extra.startswith("-") and '"' not in extra:
                 args.append(extra)

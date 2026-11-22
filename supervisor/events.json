@@ -1,6 +1,6 @@
 {
   "_comment": [
-    "Eventy od Studio Wildcard pro pole 'Event' v nastaveni instance (ASA).",
+    "Eventy od Studio Wildcard pro pole 'Event' v nastaveni instance (ASA i ASE).",
     "Event = mod z CurseForge (stejne ID kazdy rok, Wildcard jen nahraje novy soubor) a/nebo prepinace.",
     "",
     "'calendar' pouziva volba 'Jako oficialni servery': event bezi od 'start' do 'end' vcetne (datum,",
@@ -11,6 +11,10 @@
     "",
     "Po konci eventu se mod NEodebira, ale zustane jako -passivemods (Wildcard, patch 33.15:",
     "odebrani modu muze smazat predmety a skiny z eventu). Viz plan_event v arkclustersupervisor.py.",
+    "",
+    "ASE: event je jen prepinac -ActiveEvent (obsah je ve hre, zadny mod). Oficialni ASE servery uz eventy",
+    "nespousti, terminy ASE ridi provozovatel: zaznamy kalendare s \"game\": \"ase\" (zaznam bez \"game\" = ASA).",
+    "Pred zacatkem eventu, ktery jeste nebezel, projit jeho dina a loot (Conquest: conquest.debug.crate).",
     "Zdroje: Steam news app 2399830 (Community Crunch, 'is live!' prispevky), CurseForge StudioWildcardMods."
   ],
   "events": {
@@ -22,6 +26,15 @@
       "easter":      {"name": "Eggcellent Adventure", "mods": ["877745"]},
       "anniversary": {"name": "ARK Anniversary",      "mods": [], "args": ["-ActiveEvent=Birthday"]},
       "summer":      {"name": "Summer Bash",          "mods": ["927091"]}
+    },
+    "ase": {
+      "fear":        {"name": "Fear Evolved",         "mods": [], "args": ["-ActiveEvent=FearEvolved"]},
+      "turkey":      {"name": "Turkey Trial",         "mods": [], "args": ["-ActiveEvent=TurkeyTrial"]},
+      "winter":      {"name": "Winter Wonderland",    "mods": [], "args": ["-ActiveEvent=WinterWonderland"]},
+      "love":        {"name": "Love Evolved",         "mods": [], "args": ["-ActiveEvent=vday"]},
+      "easter":      {"name": "Eggcellent Adventure", "mods": [], "args": ["-ActiveEvent=Easter"]},
+      "anniversary": {"name": "ARK Anniversary",      "mods": [], "args": ["-ActiveEvent=Birthday"]},
+      "summer":      {"name": "Summer Bash",          "mods": [], "args": ["-ActiveEvent=Summer"]}
     }
   },
   "calendar": [
@@ -31,7 +44,14 @@
     {"event": "love",        "start": "2027-02-11", "end": "2027-02-18", "confirmed": false, "note": "kolem Valentyna; 2024 a 2025 prodlouzeno"},
     {"event": "easter",      "start": "2027-03-24", "end": "2027-04-07", "confirmed": false, "note": "od Velikonoc -4/5 dni do +9/10 dni; Velikonoce 2027 = 28. 3."},
     {"event": "anniversary", "start": "2027-06-01", "end": "2027-06-15", "confirmed": false, "note": "2025: 5.-17. 6., 2026: 2.-18. 6."},
-    {"event": "summer",      "start": "2027-07-01", "end": "2027-07-15", "confirmed": false, "note": "2024 a 2025 zacatkem cervence, 2026 az 17. 7."}
+    {"event": "summer",      "start": "2027-07-01", "end": "2027-07-15", "confirmed": false, "note": "2024 a 2025 zacatkem cervence, 2026 az 17. 7."},
+    {"game": "ase", "event": "turkey",      "start": "2026-11-24", "end": "2026-12-08", "note": "terminy ASE ridime my, podobne ASA"},
+    {"game": "ase", "event": "winter",      "start": "2026-12-18", "end": "2027-01-05", "note": "Conquest: darky Raptora Clause a novorocni darky = loot/<mapa>.ini SupplyCrate_Gift"},
+    {"game": "ase", "event": "love",        "start": "2027-02-11", "end": "2027-02-18"},
+    {"game": "ase", "event": "easter",      "start": "2027-03-24", "end": "2027-04-07", "note": "pred startem projit dina a loot eventu"},
+    {"game": "ase", "event": "anniversary", "start": "2027-06-01", "end": "2027-06-15"},
+    {"game": "ase", "event": "summer",      "start": "2027-07-01", "end": "2027-07-15", "note": "pred startem projit dina a loot eventu"},
+    {"game": "ase", "event": "fear",        "start": "2027-10-27", "end": "2027-11-10"}
   ],
   "history": [
     {"event": "turkey",      "start": "2023-12-08", "end": "2023-12-18"},

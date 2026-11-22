@@ -209,6 +209,19 @@ Kalendář v `events.json` je **odhad podle minulých let** (`confirmed: false`)
 oznamuje data v Community Crunch na Steamu jen 3–5 dní předem a eventy často prodlužuje.
 Po oznámení přepiš data a dej `confirmed: true`. Sekce `history` je podklad pro odhady.
 
+### Eventy v ASE (Winter Wonderland, Turkey Trial…)
+
+V ASE je obsah eventů přímo ve hře a zapíná ho jen přepínač `-ActiveEvent=<jméno>`
+(`WinterWonderland`, `TurkeyTrial`, `FearEvolved`, `vday`, `Easter`, `Summer`, `Birthday`).
+Oficiální servery ASE už eventy nespouštějí, takže termíny určuje provozovatel: volba
+*Podle kalendáře* v poli *Event* bere jen záznamy kalendáře s `"game": "ase"`. Záznam bez
+`"game"` patří ASA. Žádný mod se nepřidává, po konci eventu přepínač prostě zmizí.
+
+Event mění obsah hry, a to i loot. Winter Wonderland pouští Raptora Clause, který rozdává
+dárky (`SupplyCrate_Gift`), na Nový rok rozhodí po mapě dalších 100 dárků a část parasaurů
+nahradí Gacha Clausem a Tek parasaurem. Server s vlastními pravidly lootu musí dárek
+přepsat sám, například přes `ConfigOverrideSupplyCrateItems`.
+
 ## Konfigurace
 
 Konfigurace je generovaná — needituj ji v instanci, přepíše se. Uprav místo toho:
