@@ -621,7 +621,7 @@ def proc_stats(proc):
     return rss_kb, cpu
 
 
-# ListPlayers: "0. Jmeno, 76561198012345678" - u crossplay muze byt misto
+# ListPlayers: "0. Jmeno, 7656119xxxxxxxxxx" - u crossplay muze byt misto
 # SteamID id EOS (hex). Jmeno muze obsahovat carku, id je az za posledni.
 PLAYER_LINE = re.compile(r"^\s*\d+\.\s*(?P<name>.+?),\s*(?P<id>[0-9A-Za-z]+)\s*$")
 
