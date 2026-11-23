@@ -381,6 +381,7 @@ class Config:
         self.event = env("ARK_EVENT") or "off"
         self.passive_mods = []      # doplni main() podle plan_event
         self.event_args = []
+        self.rate_boost = None      # raty navic behem eventu, viz event_rate_boost
         self.custom_options = env("ARK_CUSTOM_OPTIONS")
         # Mody - cisla projektu z CurseForge (ASA) / Steam Workshopu (ASE).
         self.mods = [m for m in re.split(r"[\s,;]+", env("ARK_MODS")) if m]
@@ -704,7 +705,48 @@ def plan_event(choice, events, today, seen, mods, game=None):
     out = passive + [m for m in list(mods) + active if m not in passive]
     out = list(dict.fromkeys(out))
     args = [a for a in (detail.get("args") or []) if a.startswith("-") and '"' not in a] if key else []
-    return {"mods": out, "passive": passive, "args": args, "active": key, "detail": detail, "seen": seen}
+    return {"mods": out, "passive": passive, "args": args, "active": key, "detail": detail, "seen": seen,
+            "boost": event_rate_boost(events, key, detail, game)}
+
+
+def event_rate_boost(events, key, detail, game=None):
+    """Raty navic behem eventu -> {"factor", "cmdline": {klic: smer}, "gameini": {...}} nebo None.
+
+    events.json: "rate_boost" -> hra -> {"factor": 2.0, "cmdline": {...}, "gameini": {...}}.
+    Smer "up" = hodnota x faktor (XP, ochocovani, lihnuti, dospivani), "down" = hodnota / faktor:
+    u intervalu (MatingInterval, LayEggInterval, BabyCuddleInterval) mensi cislo znamena casteji,
+    takze 2x event je polovicni hodnota. Zaklad je to, co by mapa mela bez eventu (preset + nastaveni
+    instance), viz MapServer.command_line a write_shared_config. Event muze faktor prepsat vlastnim
+    "rate_boost" (cislo, nebo false = bez boostu).
+    """
+    if not key:
+        return None
+    spec = (events.get("rate_boost") or {}).get(game or GAME) or {}
+    own = detail.get("rate_boost", True)
+    if own is False or own is None:
+        return None
+    try:
+        factor = float(spec.get("factor", 1) if own is True else own)
+    except (TypeError, ValueError):
+        return None
+    # Pojistka proti preklepu (20 misto 2.0): vic nez 10x event nedela.
+    if not 0 < factor <= 10 or factor == 1:
+        return None
+    keys = {section: {k: d for k, d in (spec.get(section) or {}).items() if d in ("up", "down")}
+            for section in ("cmdline", "gameini")}
+    if not any(keys.values()):
+        return None
+    return {"factor": factor, **keys}
+
+
+def boost_rate(value, direction, factor):
+    return value * factor if direction == "up" else value / factor
+
+
+def format_rate(value):
+    """10.0 -> "10.0", 0.1 -> "0.1" (bez 0.1000000000000001 a bez exponentu)."""
+    text = f"{value:.6f}".rstrip("0")
+    return text + "0" if text.endswith(".") else text
 
 
 # Verze modu na Steam Workshopu - Web API bez klice.
@@ -856,6 +898,32 @@ def write_shared_config(cfg, presets, preset_name):
     gameini_rates = {key: value for key, value in preset.get("gameini", {}).items()
                      if key.lower() not in own}
 
+    boost = getattr(cfg, "rate_boost", None)
+    changed = []
+    if boost:
+        # Zaklad = hodnota bez eventu: radek instance, jinak preset, jinak 1.0 (vychozi ARK).
+        # Radky instance plati pro ShooterGameMode jen pred prvni [sekci] (na ostre
+        # nasleduje [StructuresPlus]) - chybejici klic proto patri do {{RATES}}, ne na konec.
+        head = next((i for i, line in enumerate(extra) if line.startswith("[")), len(extra))
+        base = {key.lower(): value for key, value in preset.get("gameini", {}).items()}
+        for key, direction in boost.get("gameini", {}).items():
+            hits = [i for i in range(head)
+                    if extra[i].split("=", 1)[0].strip().lower() == key.lower()]
+            raw = extra[hits[-1]].split("=", 1)[1].strip() if hits else base.get(key.lower(), 1.0)
+            try:
+                old = float(raw)
+            except (TypeError, ValueError):
+                log(f"VAROVANI: Game.ini {key}={raw} neni cislo - event ho nemeni")
+                continue
+            new = format_rate(boost_rate(old, direction, boost["factor"]))
+            if hits:
+                for i in hits:
+                    extra[i] = f"{key}={new}"
+            else:
+                gameini_rates = {k: v for k, v in gameini_rates.items() if k.lower() != key.lower()}
+                gameini_rates[key] = new
+            changed.append(f"{key} {format_rate(old)}->{new}")
+
     rates = "\n".join(f"{key}={value}" for key, value in sorted(gameini_rates.items()))
     if not rates:
         rates = "; (preset 'normal' - zadne prepisy)"
@@ -879,6 +947,8 @@ def write_shared_config(cfg, presets, preset_name):
             log(f"CHYBA: Game.ini nelze zapsat: {exc}")
     log(f"Konfig pripraven: preset '{preset_name}', Game.ini zamceno na 444, "
         f"ServerSettings {len(cfg.server_settings)} klicu na prikazovou radku")
+    if changed:
+        log(f"Game.ini behem eventu x{boost['factor']:g}: " + ", ".join(changed))
     patch_gus(cfg)
 
 
@@ -1081,6 +1151,24 @@ class MapServer:
                                 f"mezera by prikazovou radku utnula")
                 continue
             put(extra, "Extra Launch Options")
+        # Event: az po vsech zdrojich, at se nasobi hodnota, kterou by mapa jinak opravdu mela
+        # (na ostre XP a Harvest z Extra Launch Options prebiji preset). Chybejici klic = 1.0.
+        boost = self.cfg.rate_boost
+        if boost:
+            changed = []
+            for key, direction in boost.get("cmdline", {}).items():
+                current = settings.get(key.lower(), "")
+                raw = current.split("=", 1)[1].strip() if "=" in current else "1.0"
+                try:
+                    old = float(raw)
+                except ValueError:
+                    emit(self.name, f"VAROVANI: {key}={raw} neni cislo - event ho nemeni")
+                    continue
+                new = format_rate(boost_rate(old, direction, boost["factor"]))
+                put(f"{key}={new}", "eventu")
+                changed.append(f"{key} {format_rate(old)}->{new}")
+            if changed:
+                emit(self.name, f"Event x{boost['factor']:g}: " + ", ".join(changed))
         opts.extend(settings.values())
         # SessionName POSLEDNI a BEZ uvozovek. UE si prikazovou radku sklada z
         # argv a URL mapy utne u prvni mezery - vsechno za ni tise zmizi.
@@ -1632,8 +1720,13 @@ class Supervisor:
         seen = self.state.data.get("events_seen", [])
         plan = plan_event(self.cfg.event, load_json(HERE / "events.json", {}),
                           datetime.date.today(), seen, self._base_mods)
-        self.cfg.mods, self.cfg.passive_mods, self.cfg.event_args = (
-            plan["mods"], plan["passive"], plan["args"])
+        self.cfg.mods, self.cfg.passive_mods, self.cfg.event_args, self.cfg.rate_boost = (
+            plan["mods"], plan["passive"], plan["args"], plan["boost"])
+        if plan["boost"]:
+            b = plan["boost"]
+            keys = {**b["cmdline"], **b["gameini"]}
+            log(f"Event: raty x{b['factor']:g} - nasobi se {', '.join(k for k, d in keys.items() if d == 'up') or '-'}; "
+                f"deli se (intervaly) {', '.join(k for k, d in keys.items() if d == 'down') or '-'}")
         if plan["seen"] != seen:
             self.state.data["events_seen"] = plan["seen"]
             self.state.save()

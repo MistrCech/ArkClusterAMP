@@ -15,6 +15,12 @@
     "ASE: event je jen prepinac -ActiveEvent (obsah je ve hre, zadny mod). Oficialni ASE servery uz eventy",
     "nespousti, terminy ASE ridi provozovatel: zaznamy kalendare s \"game\": \"ase\" (zaznam bez \"game\" = ASA).",
     "Pred zacatkem eventu, ktery jeste nebezel, projit jeho dina a loot (Conquest: conquest.debug.crate).",
+    "",
+    "'rate_boost': raty navic po dobu eventu (vsechny eventy dane hry; event muze mit vlastni \"rate_boost\":",
+    "cislo nebo false). Zaklad = co by mapa mela bez eventu (preset + nastaveni instance). \"up\" = x factor,",
+    "\"down\" = / factor: INTERVALY (MatingInterval, LayEggInterval, BabyCuddleInterval) se pri 2x eventu",
+    "SNIZUJI na polovinu - mensi cislo = casteji. BabyFoodConsumption zamerne ne (zustava podle instance).",
+    "Plugin Conquest bere chov z Game.ini jako zaklad stupne, takze mapy s vyssim stupnem dostanou taky 2x.",
     "Zdroje: Steam news app 2399830 (Community Crunch, 'is live!' prispevky), CurseForge StudioWildcardMods."
   ],
   "events": {
@@ -35,6 +41,15 @@
       "easter":      {"name": "Eggcellent Adventure", "mods": [], "args": ["-ActiveEvent=Easter"]},
       "anniversary": {"name": "ARK Anniversary",      "mods": [], "args": ["-ActiveEvent=Birthday"]},
       "summer":      {"name": "Summer Bash",          "mods": [], "args": ["-ActiveEvent=Summer"]}
+    }
+  },
+  "rate_boost": {
+    "ase": {
+      "factor": 2.0,
+      "cmdline": {"XPMultiplier": "up", "TamingSpeedMultiplier": "up", "HarvestAmountMultiplier": "up"},
+      "gameini": {"EggHatchSpeedMultiplier": "up", "BabyMatureSpeedMultiplier": "up",
+                  "MatingIntervalMultiplier": "down", "LayEggIntervalMultiplier": "down",
+                  "BabyCuddleIntervalMultiplier": "down"}
     }
   },
   "calendar": [
